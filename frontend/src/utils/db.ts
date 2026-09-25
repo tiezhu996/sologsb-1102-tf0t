@@ -10,11 +10,12 @@ import type { Scene } from '../types/scene';
 import type { ShadowRole } from '../types/role';
 import type { Operator } from '../types/operator';
 import type { PercussionCue } from '../types/cue';
+import type { Rehearsal } from '../types/rehearsal';
 import { nowIso } from './uuid';
 import { seedDatabase } from './seed';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据库名 */
 export const DB_NAME = 'gbshadowplay';
@@ -30,8 +31,9 @@ export type SceneRow = Scene & Revisioned;
 export type RoleRow = ShadowRole & Revisioned;
 export type OperatorRow = Operator & Revisioned;
 export type CueRow = PercussionCue & Revisioned;
+export type RehearsalRow = Rehearsal & Revisioned;
 
-export const ROW_REVISION = 2;
+export const ROW_REVISION = 3;
 
 class ShadowPlayDatabase extends Dexie {
   plays!: Table<PlayRow, string>;
@@ -39,6 +41,7 @@ class ShadowPlayDatabase extends Dexie {
   roles!: Table<RoleRow, string>;
   operators!: Table<OperatorRow, string>;
   cues!: Table<CueRow, string>;
+  rehearsals!: Table<RehearsalRow, string>;
 
   constructor() {
     super(DB_NAME);
@@ -53,7 +56,7 @@ class ShadowPlayDatabase extends Dexie {
     });
 
     // v2：新增 revision 行修订号；场次补充索引，锣鼓点补充 playId 冗余便于按剧目统计
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         plays: 'id, title, genre, status, createdAt, updatedAt',
         scenes: 'id, playId, seq, progress, needsShadowScreen',
@@ -75,6 +78,26 @@ class ShadowPlayDatabase extends Dexie {
             row.revision = ROW_REVISION;
             if (typeof row.updatedAt !== 'string') row.updatedAt = nowIso();
             if (typeof row.createdAt !== 'string') row.createdAt = row.updatedAt;
+          });
+        }
+      });
+
+    // v3：新增连排表（排练日 + 开始时间 + 覆盖场次）；行修订号同步提升
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        rehearsals: 'id, playId, weekday',
+      })
+      .upgrade(async (tx) => {
+        const tables: Array<Table<Record<string, unknown>, string>> = [
+          tx.table('plays'),
+          tx.table('scenes'),
+          tx.table('roles'),
+          tx.table('operators'),
+          tx.table('cues'),
+        ];
+        for (const table of tables) {
+          await table.toCollection().modify((row: Record<string, unknown>) => {
+            row.revision = ROW_REVISION;
           });
         }
       });
@@ -107,7 +130,7 @@ export async function putPlay(row: PlayRow): Promise<void> {
 }
 
 export async function removePlay(id: string): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.cues, async () => {
+  await db.transaction('rw', db.plays, db.scenes, db.roles, db.cues, db.rehearsals, async () => {
     const scenes = await db.scenes.where('playId').equals(id).toArray();
     const sceneIds = scenes.map((scene) => scene.id);
     if (sceneIds.length > 0) {
@@ -115,6 +138,7 @@ export async function removePlay(id: string): Promise<void> {
       await db.cues.where('sceneId').anyOf(sceneIds).delete();
     }
     await db.scenes.where('playId').equals(id).delete();
+    await db.rehearsals.where('playId').equals(id).delete();
     await db.plays.delete(id);
   });
 }
@@ -124,6 +148,10 @@ export async function removePlay(id: string): Promise<void> {
 export async function listScenesByPlay(playId: string): Promise<SceneRow[]> {
   const rows = await db.scenes.where('playId').equals(playId).toArray();
   return rows.sort((a, b) => a.seq - b.seq);
+}
+
+export async function listAllScenes(): Promise<SceneRow[]> {
+  return db.scenes.toArray();
 }
 
 export async function getScene(id: string): Promise<SceneRow | undefined> {
@@ -139,10 +167,20 @@ export async function putScenes(rows: SceneRow[]): Promise<void> {
 }
 
 export async function removeScene(id: string): Promise<void> {
-  await db.transaction('rw', db.scenes, db.roles, db.cues, async () => {
+  await db.transaction('rw', db.scenes, db.roles, db.cues, db.rehearsals, async () => {
     await db.roles.where('sceneId').equals(id).delete();
     await db.cues.where('sceneId').equals(id).delete();
     await db.scenes.delete(id);
+    // 连排里摘掉该场次；不再覆盖任何场次的连排一并取消，占用的时段随之空出
+    const affected = await db.rehearsals.filter((row) => row.sceneIds.includes(id)).toArray();
+    for (const row of affected) {
+      const sceneIds = row.sceneIds.filter((sceneId) => sceneId !== id);
+      if (sceneIds.length === 0) {
+        await db.rehearsals.delete(row.id);
+      } else {
+        await db.rehearsals.put({ ...row, sceneIds, updatedAt: nowIso() });
+      }
+    }
   });
 }
 
@@ -214,6 +252,24 @@ export async function removeCue(id: string): Promise<void> {
   await db.cues.delete(id);
 }
 
+/* ------------------------------ 连排 ------------------------------ */
+
+export async function listRehearsals(): Promise<RehearsalRow[]> {
+  return db.rehearsals.toArray();
+}
+
+export async function listRehearsalsByPlay(playId: string): Promise<RehearsalRow[]> {
+  return db.rehearsals.where('playId').equals(playId).toArray();
+}
+
+export async function putRehearsal(row: RehearsalRow): Promise<void> {
+  await db.rehearsals.put(row);
+}
+
+export async function removeRehearsal(id: string): Promise<void> {
+  await db.rehearsals.delete(id);
+}
+
 /* --------------------------- 整库导入导出 --------------------------- */
 
 export interface DatabaseSnapshot {
@@ -226,16 +282,18 @@ export interface DatabaseSnapshot {
   roles: ShadowRole[];
   operators: Operator[];
   cues: PercussionCue[];
+  rehearsals: Rehearsal[];
 }
 
 /** 导出整库快照（去掉内部 revision 字段） */
 export async function exportSnapshot(): Promise<DatabaseSnapshot> {
-  const [plays, scenes, roles, operators, cues] = await Promise.all([
+  const [plays, scenes, roles, operators, cues, rehearsals] = await Promise.all([
     db.plays.toArray(),
     db.scenes.toArray(),
     db.roles.toArray(),
     db.operators.toArray(),
     db.cues.toArray(),
+    db.rehearsals.toArray(),
   ]);
   const strip = <T extends Revisioned>(row: T): Omit<T, 'revision'> => {
     const { revision: _revision, ...rest } = row;
@@ -250,18 +308,20 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
     roles: roles.map(strip),
     operators: operators.map(strip),
     cues: cues.map(strip),
+    rehearsals: rehearsals.map(strip),
   };
 }
 
-/** 用快照覆盖整库（导入存档） */
+/** 用快照覆盖整库（导入存档）；旧版存档没有连排表时按空数组兜底 */
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
+  await db.transaction('rw', [db.plays, db.scenes, db.roles, db.operators, db.cues, db.rehearsals], async () => {
     await Promise.all([
       db.plays.clear(),
       db.scenes.clear(),
       db.roles.clear(),
       db.operators.clear(),
       db.cues.clear(),
+      db.rehearsals.clear(),
     ]);
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION });
     await db.plays.bulkPut(snapshot.plays.map(rev));
@@ -269,18 +329,20 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.roles.bulkPut(snapshot.roles.map(rev));
     await db.operators.bulkPut(snapshot.operators.map(rev));
     await db.cues.bulkPut(snapshot.cues.map(rev));
+    await db.rehearsals.bulkPut((snapshot.rehearsals ?? []).map(rev));
   });
 }
 
 /** 清空全部数据并重新灌入示例数据 */
 export async function resetDatabase(): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
+  await db.transaction('rw', [db.plays, db.scenes, db.roles, db.operators, db.cues, db.rehearsals], async () => {
     await Promise.all([
       db.plays.clear(),
       db.scenes.clear(),
       db.roles.clear(),
       db.operators.clear(),
       db.cues.clear(),
+      db.rehearsals.clear(),
     ]);
   });
   await seedDatabase();
@@ -288,12 +350,13 @@ export async function resetDatabase(): Promise<void> {
 
 /** 粗略统计各表行数，用于页脚与概览展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [plays, scenes, roles, operators, cues] = await Promise.all([
+  const [plays, scenes, roles, operators, cues, rehearsals] = await Promise.all([
     db.plays.count(),
     db.scenes.count(),
     db.roles.count(),
     db.operators.count(),
     db.cues.count(),
+    db.rehearsals.count(),
   ]);
-  return { plays, scenes, roles, operators, cues };
+  return { plays, scenes, roles, operators, cues, rehearsals };
 }

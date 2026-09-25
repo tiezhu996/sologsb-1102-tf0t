@@ -25,6 +25,7 @@ import {
 } from 'antd';
 import {
   ArrowLeftOutlined,
+  CalendarOutlined,
   CheckSquareOutlined,
   PlusOutlined,
   SaveOutlined,
@@ -188,6 +189,9 @@ export default function SceneBoard() {
           <Space wrap>
             <Button icon={<PlusOutlined />} type="primary" onClick={openCreate}>
               新增场次
+            </Button>
+            <Button icon={<CalendarOutlined />} onClick={() => navigate(ROUTES.rehearsals(playId))}>
+              连排排期
             </Button>
             <Button
               icon={<TeamOutlined />}

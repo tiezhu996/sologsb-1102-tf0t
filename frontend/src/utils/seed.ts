@@ -2,7 +2,7 @@
  * 首次打开应用时灌入的示例班社数据
  * 只在 plays 表为空时执行，保证界面第一次进入就有可点通的内容。
  */
-import { db, ROW_REVISION, type CueRow, type OperatorRow, type PlayRow, type RoleRow, type SceneRow } from './db';
+import { db, ROW_REVISION, type CueRow, type OperatorRow, type PlayRow, type RehearsalRow, type RoleRow, type SceneRow } from './db';
 import { uuid, nowIso } from './uuid';
 
 interface SeedSceneSpec {
@@ -287,8 +287,10 @@ export async function seedDatabase(): Promise<void> {
   const sceneRows: SceneRow[] = [];
   const roleRows: RoleRow[] = [];
   const cueRows: CueRow[] = [];
+  const rehearsalRows: RehearsalRow[] = [];
+  const firstPlaySceneIds: string[] = [];
 
-  PLAYS.forEach((playSpec) => {
+  PLAYS.forEach((playSpec, playIndex) => {
     const playId = uuid();
     playRows.push({
       id: playId,
@@ -305,6 +307,7 @@ export async function seedDatabase(): Promise<void> {
 
     playSpec.scenes.forEach((sceneSpec, sceneIndex) => {
       const sceneId = uuid();
+      if (playIndex === 0) firstPlaySceneIds.push(sceneId);
       sceneRows.push({
         id: sceneId,
         playId,
@@ -356,11 +359,28 @@ export async function seedDatabase(): Promise<void> {
     });
   });
 
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
+  // 示例连排：第一出戏周三 14:00（08:00 基准偏移 360 分钟）连排前两场，
+  // 参与操耍人由已派角色汇总（霍连生、苗凤仪、裴三保、闻小楼），当日均无已排时段
+  if (playRows.length > 0 && firstPlaySceneIds.length >= 2) {
+    rehearsalRows.push({
+      id: uuid(),
+      playId: playRows[0].id,
+      weekday: 3,
+      startMinute: 360,
+      sceneIds: firstPlaySceneIds.slice(0, 2),
+      note: '合乐前连排前两场',
+      createdAt: stamp,
+      updatedAt: stamp,
+      revision: ROW_REVISION,
+    });
+  }
+
+  await db.transaction('rw', [db.plays, db.scenes, db.roles, db.operators, db.cues, db.rehearsals], async () => {
     await db.operators.bulkPut(operatorRows);
     await db.plays.bulkPut(playRows);
     await db.scenes.bulkPut(sceneRows);
     await db.roles.bulkPut(roleRows);
     await db.cues.bulkPut(cueRows);
+    await db.rehearsals.bulkPut(rehearsalRows);
   });
 }
