@@ -2,7 +2,7 @@
  * 首次打开应用时灌入的示例班社数据
  * 只在 plays 表为空时执行，保证界面第一次进入就有可点通的内容。
  */
-import { db, ROW_REVISION, type CueRow, type OperatorRow, type PlayRow, type RoleRow, type SceneRow } from './db';
+import { db, ROW_REVISION, type CueRow, type OperatorRow, type PlayRow, type RoleRow, type RunThroughRow, type SceneRow } from './db';
 import { uuid, nowIso } from './uuid';
 
 interface SeedSceneSpec {
@@ -287,6 +287,7 @@ export async function seedDatabase(): Promise<void> {
   const sceneRows: SceneRow[] = [];
   const roleRows: RoleRow[] = [];
   const cueRows: CueRow[] = [];
+  const runThroughRows: RunThroughRow[] = [];
 
   PLAYS.forEach((playSpec) => {
     const playId = uuid();
@@ -356,11 +357,31 @@ export async function seedDatabase(): Promise<void> {
     });
   });
 
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
+  // 示例连排：《白蛇传·借伞》周六 14:00 全剧走一遍（14+18+22 = 54 分钟，全员参与）
+  const firstPlayScenes = sceneRows.filter((scene) => scene.playId === playRows[0]?.id);
+  if (playRows.length > 0 && firstPlayScenes.length > 0) {
+    runThroughRows.push({
+      id: uuid(),
+      playId: playRows[0].id,
+      weekday: 6,
+      startMinute: 6 * 60, // 14:00（相对 08:00 基准）
+      durationMinute: firstPlayScenes.reduce((acc, scene) => acc + scene.durationMin, 0),
+      sceneIds: firstPlayScenes.map((scene) => scene.id),
+      sceneTitles: firstPlayScenes.map((scene) => scene.title),
+      operatorIds: operatorRows.map((operator) => operator.id),
+      note: '全剧连排：游湖 → 结亲 → 水漫',
+      createdAt: stamp,
+      updatedAt: stamp,
+      revision: ROW_REVISION,
+    });
+  }
+
+  await db.transaction('rw', [db.plays, db.scenes, db.roles, db.operators, db.cues, db.runThroughs], async () => {
     await db.operators.bulkPut(operatorRows);
     await db.plays.bulkPut(playRows);
     await db.scenes.bulkPut(sceneRows);
     await db.roles.bulkPut(roleRows);
     await db.cues.bulkPut(cueRows);
+    await db.runThroughs.bulkPut(runThroughRows);
   });
 }

@@ -10,11 +10,13 @@ import type { Scene } from '../types/scene';
 import type { ShadowRole } from '../types/role';
 import type { Operator } from '../types/operator';
 import type { PercussionCue } from '../types/cue';
+import type { RunThrough } from '../types/runThrough';
+import { compareRunThroughs } from '../types/runThrough';
 import { nowIso } from './uuid';
 import { seedDatabase } from './seed';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据库名 */
 export const DB_NAME = 'gbshadowplay';
@@ -30,6 +32,7 @@ export type SceneRow = Scene & Revisioned;
 export type RoleRow = ShadowRole & Revisioned;
 export type OperatorRow = Operator & Revisioned;
 export type CueRow = PercussionCue & Revisioned;
+export type RunThroughRow = RunThrough & Revisioned;
 
 export const ROW_REVISION = 2;
 
@@ -39,6 +42,7 @@ class ShadowPlayDatabase extends Dexie {
   roles!: Table<RoleRow, string>;
   operators!: Table<OperatorRow, string>;
   cues!: Table<CueRow, string>;
+  runThroughs!: Table<RunThroughRow, string>;
 
   constructor() {
     super(DB_NAME);
@@ -53,7 +57,7 @@ class ShadowPlayDatabase extends Dexie {
     });
 
     // v2：新增 revision 行修订号；场次补充索引，锣鼓点补充 playId 冗余便于按剧目统计
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         plays: 'id, title, genre, status, createdAt, updatedAt',
         scenes: 'id, playId, seq, progress, needsShadowScreen',
@@ -78,6 +82,11 @@ class ShadowPlayDatabase extends Dexie {
           });
         }
       });
+
+    // v3：新增连排排期表（排练日 + 开始时间 + 连排场次 + 参与操耍人快照）
+    this.version(DB_SCHEMA_VERSION).stores({
+      runThroughs: 'id, playId, weekday',
+    });
   }
 }
 
@@ -107,7 +116,7 @@ export async function putPlay(row: PlayRow): Promise<void> {
 }
 
 export async function removePlay(id: string): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.cues, async () => {
+  await db.transaction('rw', db.plays, db.scenes, db.roles, db.cues, db.runThroughs, async () => {
     const scenes = await db.scenes.where('playId').equals(id).toArray();
     const sceneIds = scenes.map((scene) => scene.id);
     if (sceneIds.length > 0) {
@@ -115,6 +124,7 @@ export async function removePlay(id: string): Promise<void> {
       await db.cues.where('sceneId').anyOf(sceneIds).delete();
     }
     await db.scenes.where('playId').equals(id).delete();
+    await db.runThroughs.where('playId').equals(id).delete();
     await db.plays.delete(id);
   });
 }
@@ -214,6 +224,22 @@ export async function removeCue(id: string): Promise<void> {
   await db.cues.delete(id);
 }
 
+/* ----------------------------- 连排排期 ----------------------------- */
+
+/** 全社连排排期：按排练日 + 开始时间排序 */
+export async function listRunThroughs(): Promise<RunThroughRow[]> {
+  const rows = await db.runThroughs.toArray();
+  return rows.sort(compareRunThroughs);
+}
+
+export async function putRunThrough(row: RunThroughRow): Promise<void> {
+  await db.runThroughs.put(row);
+}
+
+export async function removeRunThrough(id: string): Promise<void> {
+  await db.runThroughs.delete(id);
+}
+
 /* --------------------------- 整库导入导出 --------------------------- */
 
 export interface DatabaseSnapshot {
@@ -226,16 +252,18 @@ export interface DatabaseSnapshot {
   roles: ShadowRole[];
   operators: Operator[];
   cues: PercussionCue[];
+  runThroughs: RunThrough[];
 }
 
 /** 导出整库快照（去掉内部 revision 字段） */
 export async function exportSnapshot(): Promise<DatabaseSnapshot> {
-  const [plays, scenes, roles, operators, cues] = await Promise.all([
+  const [plays, scenes, roles, operators, cues, runThroughs] = await Promise.all([
     db.plays.toArray(),
     db.scenes.toArray(),
     db.roles.toArray(),
     db.operators.toArray(),
     db.cues.toArray(),
+    db.runThroughs.toArray(),
   ]);
   const strip = <T extends Revisioned>(row: T): Omit<T, 'revision'> => {
     const { revision: _revision, ...rest } = row;
@@ -250,18 +278,20 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
     roles: roles.map(strip),
     operators: operators.map(strip),
     cues: cues.map(strip),
+    runThroughs: runThroughs.map(strip),
   };
 }
 
-/** 用快照覆盖整库（导入存档） */
+/** 用快照覆盖整库（导入存档）；旧存档没有 runThroughs 字段时按空表处理 */
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
+  await db.transaction('rw', [db.plays, db.scenes, db.roles, db.operators, db.cues, db.runThroughs], async () => {
     await Promise.all([
       db.plays.clear(),
       db.scenes.clear(),
       db.roles.clear(),
       db.operators.clear(),
       db.cues.clear(),
+      db.runThroughs.clear(),
     ]);
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION });
     await db.plays.bulkPut(snapshot.plays.map(rev));
@@ -269,18 +299,20 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.roles.bulkPut(snapshot.roles.map(rev));
     await db.operators.bulkPut(snapshot.operators.map(rev));
     await db.cues.bulkPut(snapshot.cues.map(rev));
+    await db.runThroughs.bulkPut((snapshot.runThroughs ?? []).map(rev));
   });
 }
 
 /** 清空全部数据并重新灌入示例数据 */
 export async function resetDatabase(): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
+  await db.transaction('rw', [db.plays, db.scenes, db.roles, db.operators, db.cues, db.runThroughs], async () => {
     await Promise.all([
       db.plays.clear(),
       db.scenes.clear(),
       db.roles.clear(),
       db.operators.clear(),
       db.cues.clear(),
+      db.runThroughs.clear(),
     ]);
   });
   await seedDatabase();
@@ -288,12 +320,13 @@ export async function resetDatabase(): Promise<void> {
 
 /** 粗略统计各表行数，用于页脚与概览展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [plays, scenes, roles, operators, cues] = await Promise.all([
+  const [plays, scenes, roles, operators, cues, runThroughs] = await Promise.all([
     db.plays.count(),
     db.scenes.count(),
     db.roles.count(),
     db.operators.count(),
     db.cues.count(),
+    db.runThroughs.count(),
   ]);
-  return { plays, scenes, roles, operators, cues };
+  return { plays, scenes, roles, operators, cues, runThroughs };
 }

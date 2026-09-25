@@ -22,6 +22,7 @@ import {
   Typography,
 } from 'antd';
 import {
+  CalendarOutlined,
   DatabaseOutlined,
   DeleteOutlined,
   DownloadOutlined,
@@ -318,6 +319,19 @@ export default function PlayList() {
                           }}
                         >
                           场次
+                        </Button>
+                      </Tooltip>,
+                      <Tooltip title="安排与查看连排" key="runthroughs">
+                        <Button
+                          type="link"
+                          icon={<CalendarOutlined />}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            selectPlay(play.id);
+                            navigate(ROUTES.runThroughs(play.id));
+                          }}
+                        >
+                          连排
                         </Button>
                       </Tooltip>,
                       <Tooltip title="编辑剧目" key="edit">

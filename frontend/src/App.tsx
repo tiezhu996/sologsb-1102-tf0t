@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Badge, Button, Layout, Menu, Space, Tag, Typography, message } from 'antd';
 import {
   AppstoreOutlined,
+  CalendarOutlined,
   DashboardOutlined,
   ReadOutlined,
   SoundOutlined,
@@ -15,9 +16,10 @@ import { initDatabase } from './utils/db';
 
 const { Header, Sider, Content, Footer } = Layout;
 
-/** 侧边导航：按当前路径高亮，场次/角色/锣鼓点页复用当前剧目上下文 */
+/** 侧边导航：按当前路径高亮，场次/连排/角色/锣鼓点页复用当前剧目上下文 */
 function buildSelectedKey(pathname: string, currentPlayId: string | null): string {
   if (pathname.startsWith('/operators')) return ROUTES.operators;
+  if (pathname.includes('/runthroughs') && currentPlayId) return ROUTES.runThroughs(currentPlayId);
   if (pathname.startsWith('/plays/') && currentPlayId) return ROUTES.scenes(currentPlayId);
   return ROUTES.plays;
 }
@@ -83,6 +85,12 @@ export default function App() {
                 key: currentPlayId ? ROUTES.scenes(currentPlayId) : 'scenes-disabled',
                 icon: <ReadOutlined />,
                 label: currentPlay ? `场次拆分 · ${currentPlay.title}` : '场次拆分（先选剧目）',
+                disabled: !currentPlayId,
+              },
+              {
+                key: currentPlayId ? ROUTES.runThroughs(currentPlayId) : 'runthroughs-disabled',
+                icon: <CalendarOutlined />,
+                label: currentPlay ? `连排排期 · ${currentPlay.title}` : '连排排期（先选剧目）',
                 disabled: !currentPlayId,
               },
               { key: ROUTES.operators, icon: <TeamOutlined />, label: '操耍人档' },
